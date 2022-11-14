@@ -5,7 +5,10 @@
   "main": "app.js",
   "dependencies": {
     "express": "^4.16.3",
-    "mongoose": "^6.7.1"
+    "feather-icons": "^4.29.0",
+    "mongoose": "^6.7.1",
+    "vis-network": "^9.1.2",
+    "vis-timeline": "^7.7.0"
   },
   "devDependencies": {
     "eslint": "^5.12.1",

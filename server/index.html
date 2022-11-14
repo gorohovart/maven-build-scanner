@@ -128,15 +128,36 @@
         crossorigin="anonymous"></script>
 
 <!-- Icons -->
-<script src="https://unpkg.com/feather-icons/dist/feather.min.js"></script>
+<script src="/static/feather-icons/feather.min.js"></script>
 
 <!-- Graphs -->
-<!--<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.7.1/Chart.min.js"></script>-->
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/2.7.1/Chart.min.js"></script>
 <script type="text/javascript" src="https://www.gstatic.com/charts/loader.js"></script>
 
 <script type="text/javascript">
     google.charts.load("current", {packages: ["corechart", "timeline"]});
 </script>
+<script type="text/javascript" src="/static/vis-timeline/vis-timeline-graph2d.min.js"></script>
+
+<link href="/static/vis-timeline/vis-timeline-graph2d.min.css" rel="stylesheet" type="text/css" />
+
+<script type="text/javascript" src="/static/vis-network/vis-network.min.js"></script>
+
+<style type="text/css">
+    #mynetwork {
+        width: 600px;
+        height: 400px;
+        border: 1px solid lightgray;
+    }
+</style>
+
+<!-- <style type="text/css">
+#visualization {
+    width: 600px;
+    height: 400px;
+    border: 1px solid lightgray;
+}
+</style> -->
 
 <script>
     var maxRecords = 20;
@@ -189,7 +210,6 @@
 
     if (projectId != null) {
         $.getJSON("/api/v1/session-summaries/" + projectId.replace(":", "%3A") + "?r=" + Math.random(), function (data) {
-
             var items = [];
             $.each(data, function (id, sessionSummary) {
                 items.push(sessionSummary);
@@ -264,8 +284,9 @@
     });
 
     if (sessionId != null) {
-        $.getJSON("/api/v1/session-profiles/" + projectId.replace(":", "%3A") + "/" + sessionId + "?r=" + Math.random(), function (data) {
-
+        var jsonLink = "/api/v1/session-profiles/" + projectId.replace(":", "%3A") + "/" + sessionId + "?r=" + Math.random();
+        $.getJSON(jsonLink, function (data) {
+            console.log(data.projectProfiles);
             $("<h1/>", {html: data.project.artifactId}).appendTo("main");
             $("<p/>", {
                 html:
@@ -296,41 +317,435 @@
             };
 
 
-            var mojoProfiles = [];
+            var groups = new vis.DataSet();
+            for (var g = 0; g <= 10; g++) {
+                groups.add({id: g, content: "Thread #" + g});
+            }
+
+            var projects = new vis.DataSet();
+            var mojos = new vis.DataSet();
+            
+            
+            // var artifactToDependencies = {};
+            // var index = 0;
+            var blockerDependencies = {};
+            var blockerDependenciesByProj = {};
+            var indexToProject = {};
+
+            function loadProjectDependencies(projectSource, projectTarget, funToCall) {
+                var jsonLink = "http://localhost:3001/deps/" + projectSource.replace(":", "%3A") + "/" + projectTarget.replace(":", "%3A");
+                var result = {};
+                $.getJSON(jsonLink, function (data) {
+                    result = data;
+                    // console.log(data);
+                    funToCall(JSON.parse(data));
+                });
+                return result;
+            }
+
+            function renderDependencies(projectSource, projectTarget) {
+                function renderResults(depsList) {
+                    // console.log('depsList: ' + depsList);
+                    var list = document.getElementById('depsList');
+                    // console.log(depsList[0]);
+
+                    list.innerHTML = '';
+                    depsList.forEach((item)=>{
+                        let li = document.createElement("li");
+                        li.innerText = item;
+                        list.appendChild(li);
+                    })
+                }
+                loadProjectDependencies(projectSource, projectTarget, renderResults);
+            }
+        
             var summaryMojoProfiles = {};
-            $.each(data.projectProfiles.filter(significantlyLong).sort(byStartTime), function (index, projectProfile) {
-                $.each(projectProfile.mojoProfiles.filter(significantlyLong).sort(byStartTime), function (index, mojoProfile) {
-                    mojoProfiles.push([
-                        "Thread #" + mojoProfile.threadIndex,
-                        projectProfile.project.artifactId + "/" + mojoProfile.mojo.artifactId + ":" + mojoProfile.executionId + ":" + mojoProfile.goal,
-                        new Date(mojoProfile.startTime),
-                        new Date(mojoProfile.endTime)
-                    ]);
-                    var key = mojoProfile.mojo.artifactId;
-                    if (!summaryMojoProfiles[key]) {
-                        summaryMojoProfiles[key] = {duration: 0};
+            var topJsDurations = new Map();
+            var dependenciesByProj = {};
+            $.each(data.projectProfiles, function (index, projectProfile) {
+                if (projectProfile.mojoProfiles.length == 0) {
+                    return;
+                }
+                var thread = projectProfile.mojoProfiles[0].threadIndex;
+                var project = projectProfile.project.groupId + ":" + projectProfile.project.artifactId;
+                var projectDurationMs = projectProfile.endTime - projectProfile.startTime;
+
+                for (var i = 0; i < projectProfile.mojoProfiles.length; i++) {
+                    var mojoProfile = projectProfile.mojoProfiles[i];
+                    var mojoArtifactId = mojoProfile.mojo.artifactId;
+                    if (!summaryMojoProfiles[mojoArtifactId]) {
+                        summaryMojoProfiles[mojoArtifactId] = {duration: 0};
                     }
-                    summaryMojoProfiles[key].duration += mojoProfile.duration;
+                    if (mojoArtifactId == 'aspectj-maven-plugin') {
+                        topJsDurations.set(project, mojoProfile.duration);
+                    }
+                    summaryMojoProfiles[mojoArtifactId].duration += mojoProfile.duration;
+
+                    mojos.add({
+                        id: index + "-" + i,
+                        group: mojoProfile.threadId,
+                        content: projectProfile.project.artifactId + "/" + mojoProfile.mojo.artifactId + ":" + mojoProfile.executionId + ":" + mojoProfile.goal,
+                        start: new Date(mojoProfile.startTime),
+                        end: new Date(mojoProfile.endTime),
+                    });
+                }
+
+                var htmlContent = ' <span>' + project + '</span>';
+
+                var tooltip = project + ' ' + parseDuration(projectDurationMs);
+                if (projectProfile.blockerDependency != null) {
+                    blockerDependencies[index] = projectProfile.blockerDependency.groupId + ":" + projectProfile.blockerDependency.artifactId;
+                    tooltip += "<br> (blocked by " + blockerDependencies[index] + ")";
+                    blockerDependenciesByProj[project] = blockerDependencies[index];
+                }
+                if (projectProfile.project.dependencies != null) {
+                    for (var i = 0; i < projectProfile.project.dependencies.length; i++) {
+                        var dep = projectProfile.project.dependencies[i];
+                        var depProject = dep.groupId + ":" + dep.artifactId;
+                        dependenciesByProj[project + "/" + depProject] = 1;
+                    }
+                }
+                // tooltip += "<br>" + mojosInfo;
+
+                indexToProject[index] = project;
+
+                projects.add({
+                    id: index,
+                    group: thread,
+                    content: htmlContent,
+                    // content: project,
+                    start: new Date(projectProfile.startTime),
+                    end: new Date(projectProfile.endTime),
+                    // type: 'box'
+                    title: tooltip,
                 });
             });
 
+            topJsDurations = new Map([...topJsDurations.entries()].sort((a, b) => b[1] - a[1]));
+            
+            console.log(topJsDurations);
+            // console.log(dependenciesByProj);
 
-            $("<div id='timeline' style='height: 500px;'/>").appendTo("main");
+            function fallbackCopyTextToClipboard(text) {
+                var textArea = document.createElement("textarea");
+                textArea.value = text;
+                
+                // Avoid scrolling to bottom
+                textArea.style.top = "0";
+                textArea.style.left = "0";
+                textArea.style.position = "fixed";
+
+                document.body.appendChild(textArea);
+                textArea.focus();
+                textArea.select();
+
+                try {
+                    var successful = document.execCommand('copy');
+                    var msg = successful ? 'successful' : 'unsuccessful';
+                    console.log('Fallback: Copying text command was ' + msg);
+                } catch (err) {
+                    console.error('Fallback: Oops, unable to copy', err);
+                }
+
+                document.body.removeChild(textArea);
+            }
+            function copyTextToClipboard(text) {
+                if (!navigator.clipboard) {
+                    fallbackCopyTextToClipboard(text);
+                    return;
+                }
+                navigator.clipboard.writeText(text).then(function() {
+                    console.log('Async: Copying to clipboard was successful!');
+                }, function(err) {
+                    console.error('Async: Could not copy text: ', err);
+                });
+            }
+
+            // console.log(blockerDependencies);
+
+            $("<div id='timeline' style='height: 550px;'> </div>").appendTo("main");
+            // $("<div id='graph' style='height: 550px;'> </div>").appendTo("main");
+            // $("<div id='mojosTimeline' style='height: 550px;'> </div>").appendTo("main");
+            $("<ul id='depsList'></ul>").appendTo("main");
+            // $("<ul id='depsToClean'></ul>").appendTo("main");
             $("<div id='mojoPieChart' style='height: 500px;'/>").appendTo("main");
+            
+            let drawNewTimeline = function () {
 
-            let drawTimeline = function () {
+                var container = document.getElementById('timeline');
+                var options = {
+                    groupOrder: 'content',  // groupOrder can be a property name or a sorting function
+                    stack: false,
+                    align: 'left',
+                    orientation: 'top',
+                    margin: {
+                        item: 10, // minimal margin between items
+                        axis: 5   // minimal margin between items and the axis
+                    },
+                    // autoResize: 'false',
+                    tooltip: {
+                        followMouse: true
+                    },
+                    // horizontalScroll: true,
 
-                var container = document.getElementById("timeline");
-                var chart = new google.visualization.Timeline(container);
-                var dataTable = new google.visualization.DataTable();
+                };
 
-                dataTable.addColumn({type: 'string', id: 'Thread'});
-                dataTable.addColumn({type: 'string', id: 'Mojo'});
-                dataTable.addColumn({type: 'date', id: 'Start'});
-                dataTable.addColumn({type: 'date', id: 'End'});
-                dataTable.addRows(mojoProfiles);
-                chart.draw(dataTable, {timeline: {singleColor: '#666'}});
+                
+                
+
+                var timeline = new vis.Timeline(container);
+                timeline.setOptions(options);
+                timeline.setGroups(groups);
+                timeline.setItems(projects);
+
+                timeline.on('select', function (properties) {
+                    var selectedIndex = properties.items[0];
+                    var selectedProj = indexToProject[selectedIndex];
+                    // console.log("selectedIndex ----- " +  selectedIndex);
+                    var blockerProject = blockerDependencies[selectedIndex];
+                    // console.log("blockerProject ----- " +  blockerProject);
+                    var cells = container.getElementsByTagName('span');
+                    // console.log(cells);
+
+                    // loadModuleEdges(selectedProj);
+
+                    var isBlockerDependency = function (cell) {
+                        // log cell value
+                        // console.log(cell.textContent + " --- " + blockerProject + " --- " + (cell.textContent == blockerProject));
+                        return cell.textContent == blockerProject;
+                    };
+
+                    var isDependency = function (cell) {
+                        // log cell value
+                        // console.log(cell.textContent + " --- " + blockerProject + " --- " + (cell.textContent == blockerProject));
+                        var key = selectedProj + "/" + cell.textContent;
+                        // console.log(key);
+                        var isDep = dependenciesByProj[key] == 1
+                        if (isDep) {
+                            // console.log("isDep");
+                        }
+                        return isDep;
+                    };
+
+                    var isDownstreamDependency = function (cell) {
+                        // log cell value
+                        // console.log(cell.textContent + " --- " + blockerProject + " --- " + (cell.textContent == blockerProject));
+                        var key = cell.textContent + "/" + selectedProj;
+                        // console.log(key);
+                        var isDep = dependenciesByProj[key] == 1
+                        if (isDep) {
+                            // console.log("isDep");
+                        }
+                        return isDep;
+                    };
+
+                    var colorByType = {
+                        'blockerDependency': 'red',
+                        'dependency': '#3399ff',
+                        'downstreamDependency': '#c24502',
+                        'candidateToClean': '#99ff33',
+                        'INFO': 'blue',
+                        'DEBUG': 'gray',
+                        'TRACE': 'gray'
+                    };
+
+                    var getCellType = function (cell) {
+                        var wrapperElement = cell.parentElement.parentElement;
+                        if (isBlockerDependency(cell)) {
+                            return "blockerDependency";
+                        } else if (isDependency(cell)) {
+                            return "dependency";
+                        } else if (isDownstreamDependency(cell)) {
+                            return "downstreamDependency";
+                        } else if (selectedProj == cell.textContent) {
+                            return "selected";
+                        } else if (wrapperElement.getAttribute('candidateToClean') != null && 
+                                wrapperElement.getAttribute('candidateToClean') == 1) { 
+                            return "candidateToClean";
+                        } else {
+                            return "";
+                        }
+                    };
+                    
+                    for (let cell of cells) {
+                        var wrapperElement = cell.parentElement.parentElement;
+
+                        var cellType = getCellType(cell);
+                        if (cellType == "selected") {
+                            wrapperElement.style = "";
+                        } else if (cellType == "") {
+                            wrapperElement.style = "";
+                        } else {
+                            wrapperElement.style = "background-color: " + colorByType[cellType];
+                        }
+                    }
+                    // renderDependencies(indexToProject[selectedIndex], blockerProject);
+                });
+
+                timeline.on('doubleClick', function (event) {
+                    var project = indexToProject[event['item']];
+                    var artifactId = project.substring(project.indexOf(':')+1, project.length);
+                    copyTextToClipboard(artifactId);
+                });
+
+                for (let [project, blocker] of Object.entries(blockerDependenciesByProj)) {
+                    function setColorIfBlockerDoesntReferenced(data) {
+                        
+                        // console.log('project: ' + project + ' blocker: ' + blocker + ' data: ' + data);
+                        if (data.length != 0) {
+                            return;
+                        }
+                        var container = document.getElementById('timeline');
+                        var cells = container.getElementsByTagName('span');
+                        for (let cell of cells){
+                            if (cell.textContent == project) {
+                                var wrapperElement = cell.parentElement.parentElement;
+                                wrapperElement.setAttribute('style', 'background-color: #99ff33');
+                                wrapperElement.setAttribute('candidateToClean', '1');
+                            }
+                        }
+
+                        // var depsToCleanList = document.getElementById('depsToClean');
+                        // let li = document.createElement("li");
+                        // li.innerText = project + " -> " + blocker;
+                        // depsToCleanList.appendChild(li);
+                    }
+
+                    loadProjectDependencies(project, blocker, setColorIfBlockerDoesntReferenced)
+                }
+                
+
+                // var container = document.getElementById("timeline");
+                // var chart = new google.visualization.Timeline(container);
+                // var dataTable = new google.visualization.DataTable();
+
+                // dataTable.addColumn({type: 'string', id: 'Thread'});
+                // dataTable.addColumn({type: 'string', id: 'Mojo'});
+                // dataTable.addColumn({type: 'date', id: 'Start'});
+                // dataTable.addColumn({type: 'date', id: 'End'});
+                // // dataTable.addColumn({ type: 'string', id: 'style', role: 'style' });
+                // dataTable.addRows(mojoProfiles);
+                // chart.draw(dataTable, {
+                //     width: 16000,
+                //     timeline: {singleColor: '#666'}
+                // });
+                // google.visualization.events.addListener(chart, 'select', function () {
+                //     var selection = chart.getSelection();
+                //     if (selection.length > 0) {
+                //         var row = selection[0].row;
+                //         console.log(row);
+                //         var mojoProfile = mojoProfiles[row];
+                //         var mojo = mojoProfile[1];
+                //         var artifactId = mojo.substring(0, mojo.indexOf("/"));
+                //         console.log(artifactId);
+                //         var dependenciesIndicies = artifactToDependencies[artifactId];
+                //         for (var i = 0; i < dependenciesIndicies.length; i++) {
+                //             var dependencyIndex = dependenciesIndicies[i];
+                        
+                //             console.log(mojoProfiles[dependencyIndex]);
+                //             mojoProfiles[dependencyIndex][4] = '#F5E30C';
+                //         }
+                //         mojoProfile[4] = '#28E506';
+                    
+                    
+                //         var cells = container.getElementsByTagName('rect');
+
+                //         var isDependency = function (cell) {
+                //             return cell
+                //         };
+
+                //         Array.prototype.forEach.filter(significantlyLong).call(cells, function (cell) {
+                //             cell.setAttribute('font-weight', 'normal');
+                //         });
+                //     }
+
+                //     // var dataTable2 = new google.visualization.DataTable();
+                //     // dataTable2.addColumn({type: 'string', id: 'Thread'});
+                //     // dataTable2.addColumn({type: 'string', id: 'Mojo'});
+                //     // dataTable2.addColumn({type: 'date', id: 'Start'});
+                //     // dataTable2.addColumn({type: 'date', id: 'End'});
+                //     // dataTable2.addColumn({ type: 'string', id: 'style', role: 'style' });
+                //     // dataTable2.addRows(mojoProfiles);
+                //     // chart.clearChart();
+                //     // chart.draw(dataTable2, {
+                //     //     width: 16000
+                //     // });
+                // });
             };
+            // let drawMojosTimeline = function () {
+
+            //     var container = document.getElementById('mojosTimeline');
+            //     var options = {
+            //         groupOrder: 'content',  // groupOrder can be a property name or a sorting function
+            //         stack: false,
+            //         align: 'left',
+            //         orientation: 'top',
+            //         margin: {
+            //             item: 10, // minimal margin between items
+            //             axis: 5   // minimal margin between items and the axis
+            //         },
+            //         // autoResize: 'false',
+            //         tooltip: {
+            //             followMouse: true
+            //         },
+            //         // horizontalScroll: true,
+
+            //     };
+            //     console.log(mojos);
+
+
+            //     var timeline = new vis.Timeline(container);
+            //     timeline.setOptions(options);
+            //     timeline.setGroups(groups);
+            //     timeline.setItems(mojos);
+            // };
+
+            function loadModuleEdges(project) {
+                var jsonLink = "/graph/" + project.replace(":", "%3A");
+                $.getJSON(jsonLink, function (data) {
+                    // console.log(data);
+                    drawNetwork(JSON.parse(data));
+                });
+            }
+
+            function drawNetwork(data) {
+
+                var nodes = new vis.DataSet();
+                for (var i = 0; i < data.nodes.length; i++) {
+                    nodes.add({
+                        id: data.nodes[i].id,
+                        label: data.nodes[i].label
+                    });
+                }
+
+
+                var edges = new vis.DataSet();
+                for (var i = 0; i < data.edges.length; i++) {
+                    edges.add({
+                        from: data.edges[i].from,
+                        to: data.edges[i].to
+                    });
+                }
+
+                // create a network
+                var container = document.getElementById('graph');
+
+                // provide the data in the vis format
+                var data = {
+                    nodes: nodes,
+                    edges: edges
+                };
+                var options = {
+                    layout: {improvedLayout:false},
+                    physics:{
+                        stabilizations:false
+                    },
+                };
+
+                // initialize your network!
+                var network = new vis.Network(container, data, options);
+            }
+
 
             function drawMojoPieChart() {
                 var array = [
@@ -350,50 +765,52 @@
                 chart.draw(data, {title: 'Mojo Totals'});
             }
 
-            setTimeout(drawTimeline, 1000);
+            setTimeout(drawNewTimeline, 1000);
+            // setTimeout(drawMojosTimeline, 1000);
+            // setTimeout(drawTimeline, 1000);
             setTimeout(drawMojoPieChart, 1000);
 
 
             // table
 
-            var table = $("<table/>", {class: "table"});
+            // var table = $("<table/>", {class: "table"});
 
-            table.append("<thead><tr>" +
-                "<th>Project</th>" +
-                "<th>Duration</th>" +
-                "<th>Mojos</th>" +
-                "</tr></thead>");
+            // table.append("<thead><tr>" +
+            //     "<th>Project</th>" +
+            //     "<th>Duration</th>" +
+            //     "<th>Mojos</th>" +
+            //     "</tr></thead>");
 
-            var tbody = $("<tbody/>");
+            // var tbody = $("<tbody/>");
 
-            tbody.appendTo(table);
+            // tbody.appendTo(table);
 
-            $.each(data.projectProfiles.filter(significantlyLong).sort(byDuration), function (index, projectProfile) {
-                var mojoProfiles = [];
-                if (projectProfile.phaseProfiles) {
-                    $.each(projectProfile.phaseProfiles, function (indexn, phaseProfile) {
-                        $.each(phaseProfile.mojoProfiles.filter(significantlyLong).sort(byDuration), function (index, mojoProfile) {
-                            mojoProfiles.push(mojoProfile);
-                        });
-                    });
-                } else {
-                    $.each(projectProfile.mojoProfiles.filter(significantlyLong).sort(byDuration), function (index, mojoProfile) {
-                        mojoProfiles.push(mojoProfile);
-                    });
-                }
+            // $.each(data.projectProfiles.filter(significantlyLong).sort(byDuration), function (index, projectProfile) {
+            //     var mojoProfiles = [];
+            //     if (projectProfile.phaseProfiles) {
+            //         $.each(projectProfile.phaseProfiles, function (indexn, phaseProfile) {
+            //             $.each(phaseProfile.mojoProfiles.filter(significantlyLong).sort(byDuration), function (index, mojoProfile) {
+            //                 mojoProfiles.push(mojoProfile);
+            //             });
+            //         });
+            //     } else {
+            //         $.each(projectProfile.mojoProfiles.filter(significantlyLong).sort(byDuration), function (index, mojoProfile) {
+            //             mojoProfiles.push(mojoProfile);
+            //         });
+            //     }
 
-                tbody.append("<tr>" +
-                    "<td>" + projectProfile.project.artifactId + "</td>" +
-                    "<td>" + parseDuration(projectProfile.duration) + "</td>" +
-                    "<td><table class='table'><tbody>" + mojoProfiles.map(function (mojoProfile) {
-                        return "<tr><td>" + mojoProfile.mojo.artifactId + ":" + mojoProfile.executionId + ":" + mojoProfile.goal + "</td><td>" + parseDuration(mojoProfile.duration) + "</td></tr>";
-                    }).join("") + "</tbody></table></td>" +
-                    "</tr>");
+            //     tbody.append("<tr>" +
+            //         "<td>" + projectProfile.project.artifactId + "</td>" +
+            //         "<td>" + parseDuration(projectProfile.duration) + "</td>" +
+            //         "<td><table class='table'><tbody>" + mojoProfiles.map(function (mojoProfile) {
+            //             return "<tr><td>" + mojoProfile.mojo.artifactId + ":" + mojoProfile.executionId + ":" + mojoProfile.goal + "</td><td>" + parseDuration(mojoProfile.duration) + "</td></tr>";
+            //         }).join("") + "</tbody></table></td>" +
+            //         "</tr>");
 
 
-            });
+            // });
 
-            table.appendTo("main");
+            // table.appendTo("main");
 
             feather.replace();
         });

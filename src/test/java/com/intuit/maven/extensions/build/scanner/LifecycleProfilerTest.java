@@ -13,6 +13,8 @@ import com.intuit.maven.extensions.build.scanner.infra.DataStorage;
 import java.io.File;
 import java.util.Arrays;
 import java.util.List;
+
+import com.intuit.maven.extensions.build.scanner.infra.MongoDataStorage;
 import org.apache.maven.execution.ExecutionEvent;
 import org.apache.maven.model.Plugin;
 import org.apache.maven.plugin.MojoExecution;
@@ -24,17 +26,18 @@ public class LifecycleProfilerTest {
   private final LifecycleProfiler sessionProfileRenderer =
       new LifecycleProfiler(
           true,
-          sessionProfile ->
-              new DataStorage() {
-                @Override
-                public void open() {}
-
-                @Override
-                public void checkPoint() {}
-
-                @Override
-                public void close() {}
-              });
+              MongoDataStorage::new);
+//          sessionProfile ->
+//              new DataStorage() {
+//                @Override
+//                public void open() {}
+//
+//                @Override
+//                public void checkPoint() {}
+//
+//                @Override
+//                public void close() {}
+//              });
 
   private static MojoExecution mojoExecution(String test) {
     Plugin p = new Plugin();
@@ -78,5 +81,6 @@ public class LifecycleProfilerTest {
       sessionProfileRenderer.onEvent(event);
       Thread.sleep(2);
     }
+    System.out.println("finish");
   }
 }

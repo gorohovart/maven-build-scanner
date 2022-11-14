@@ -11,6 +11,7 @@ public class ProjectProfile {
   private final List<MojoProfile> mojoProfiles = new ArrayList<>();
   @NonNull private Status status;
   private long startTime, endTime;
+  private Dependency blockerDependency;
 
   public void addMojoProfile(MojoProfile mojoProfile) {
     mojoProfiles.add(mojoProfile);
@@ -35,5 +36,13 @@ public class ProjectProfile {
 
   public long getDuration() {
     return endTime - startTime;
+  }
+
+  public void setBlockerDependency(Dependency blockerDependency) {
+    this.blockerDependency = blockerDependency;
+  }
+
+  public Dependency getBlockerDependency() {
+    return blockerDependency;
   }
 }

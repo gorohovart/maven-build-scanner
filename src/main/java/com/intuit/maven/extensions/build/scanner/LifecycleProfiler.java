@@ -4,25 +4,22 @@ import static java.lang.System.currentTimeMillis;
 
 import com.intuit.maven.extensions.build.scanner.infra.DataStorage;
 import com.intuit.maven.extensions.build.scanner.infra.MongoDataStorage;
-import com.intuit.maven.extensions.build.scanner.model.Mojo;
-import com.intuit.maven.extensions.build.scanner.model.MojoProfile;
-import com.intuit.maven.extensions.build.scanner.model.Project;
-import com.intuit.maven.extensions.build.scanner.model.ProjectProfile;
-import com.intuit.maven.extensions.build.scanner.model.SessionProfile;
-import com.intuit.maven.extensions.build.scanner.model.Status;
+import com.intuit.maven.extensions.build.scanner.model.*;
+
 import java.io.File;
 import java.io.IOException;
 import java.io.UncheckedIOException;
 import java.net.InetAddress;
 import java.net.UnknownHostException;
 import java.nio.file.Files;
-import java.util.ArrayList;
-import java.util.List;
-import java.util.UUID;
+import java.util.*;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Function;
+import java.util.stream.Collectors;
 import javax.inject.Named;
 import javax.inject.Singleton;
+
+import org.apache.commons.lang3.tuple.Pair;
 import org.apache.maven.eventspy.AbstractEventSpy;
 import org.apache.maven.execution.ExecutionEvent;
 import org.apache.maven.execution.MavenExecutionRequest;
@@ -55,9 +52,24 @@ public class LifecycleProfiler extends AbstractEventSpy {
     this.dataStorageFactory = dataStorageFactory;
   }
 
-  private static Project project(MavenProject mavenProject) {
+  public DataStorage getDataStorage() {
+    return dataStorage;
+  }
+
+  private static Project project(MavenProject mavenProject, ExecutionEvent executionEvent) {
+    MavenSession session = executionEvent.getSession();
+    ProjectDependencyGraph projectDependencyGraph = session.getProjectDependencyGraph();
+    List<MavenProject> dependenciesFromGraph = projectDependencyGraph.getUpstreamProjects(mavenProject, false);
+    if (dependenciesFromGraph == null) {
+      dependenciesFromGraph = Collections.emptyList();
+    }
+    List<Dependency> deps = dependenciesFromGraph.stream().map(
+            dependency -> new Dependency(dependency.getGroupId(),
+                    dependency.getArtifactId(),
+                    dependency.getVersion())
+    ).collect(Collectors.toList());
     return new Project(
-        mavenProject.getGroupId(), mavenProject.getArtifactId(), mavenProject.getVersion());
+        mavenProject.getGroupId(), mavenProject.getArtifactId(), mavenProject.getVersion(), deps);
   }
 
   @Override
@@ -89,7 +101,7 @@ public class LifecycleProfiler extends AbstractEventSpy {
             // TODO its rather nice having the report based on the first project run, rather than
             // the top-level project
             // as that indicates quite a different build occurring
-            Project project = project(mavenProject);
+            Project project = project(mavenProject, executionEvent);
             String tag = getBranch(mavenProject);
 
             sessionProfile =
@@ -115,11 +127,7 @@ public class LifecycleProfiler extends AbstractEventSpy {
             List<MavenProject> sortedProjects = projectDependencyGraph.getSortedProjects();
             sortedProjects.forEach(
                 dependency -> {
-                  Project childProject =
-                      new Project(
-                          dependency.getGroupId(),
-                          dependency.getArtifactId(),
-                          dependency.getVersion());
+                  Project childProject = project(dependency, executionEvent);
                   sessionProfile.addProjectProfile(
                       new ProjectProfile(childProject, Status.PENDING));
                 });
@@ -139,6 +147,17 @@ public class LifecycleProfiler extends AbstractEventSpy {
               sessionProfile.setStatus(Status.SUCCEEDED);
             }
 
+            sessionProfile.getProjectProfiles().forEach(
+                projectProfile -> {
+                    Dependency blockerDependency = projectProfile.getProject().getDependencies().stream()
+                          .map(dependency -> Pair.of(dependency, sessionProfile.getProjectEndTime(
+                                  new Project(dependency.getGroupId(), dependency.getArtifactId(), dependency.getVersion(), Collections.emptyList()))))
+                          .filter(pair -> pair.getRight() != null)
+                          .max(Comparator.comparing(Pair::getRight)).orElse(Pair.of(null, null)).getLeft();
+                    projectProfile.setBlockerDependency(blockerDependency);
+                  }
+                );
+
             dataStorage.close();
 
             LOGGER.info(
@@ -155,27 +174,28 @@ public class LifecycleProfiler extends AbstractEventSpy {
         case ProjectStarted:
           {
             sessionProfile
-                .getProjectProfile(project(mavenProject))
+                .getProjectProfile(mavenProject)
                 .setStartTime(currentTimeMillis());
             break;
           }
         case ProjectSucceeded:
         case ProjectFailed:
           {
-            ProjectProfile projectProfile = sessionProfile.getProjectProfile(project(mavenProject));
+            ProjectProfile projectProfile = sessionProfile.getProjectProfile(mavenProject);
             projectProfile.setStatus(
                 Status.valueOf(executionEvent.getType().name().toUpperCase().substring(7)));
-            projectProfile.setEndTime(currentTimeMillis());
-            sessionProfile.setEndTime(currentTimeMillis());
+            long time = currentTimeMillis();
+            projectProfile.setEndTime(time);
+            sessionProfile.endProject(projectProfile.getProject(), time);
+            sessionProfile.setEndTime(time);
             maybeCheckPoint();
             break;
           }
         case MojoStarted:
           {
-            Project project = project(mavenProject);
             MojoExecution mojoExecution = executionEvent.getMojoExecution();
 
-            ProjectProfile projectProfile = sessionProfile.getProjectProfile(project);
+            ProjectProfile projectProfile = sessionProfile.getProjectProfile(mavenProject);
             MojoProfile mojoProfile =
                 new MojoProfile(
                     mojo(mojoExecution),
@@ -191,9 +211,8 @@ public class LifecycleProfiler extends AbstractEventSpy {
         case MojoSucceeded:
         case MojoFailed:
           {
-            Project project = project(mavenProject);
             MojoExecution mojoExecution = executionEvent.getMojoExecution();
-            ProjectProfile projectProfile = sessionProfile.getProjectProfile(project);
+            ProjectProfile projectProfile = sessionProfile.getProjectProfile(mavenProject);
 
             MojoProfile mojoProfile =
                 projectProfile.getMojoProfile(
@@ -264,7 +283,7 @@ public class LifecycleProfiler extends AbstractEventSpy {
   }
 
   private Mojo mojo(MojoExecution mojoExecution) {
-    return new Mojo(
-        mojoExecution.getGroupId(), mojoExecution.getArtifactId(), mojoExecution.getVersion());
+    Mojo mojo = new Mojo(mojoExecution.getGroupId(), mojoExecution.getArtifactId(), mojoExecution.getVersion());
+    return mojo;
   }
 }
